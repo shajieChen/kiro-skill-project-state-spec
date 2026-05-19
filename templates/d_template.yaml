@@ -1,0 +1,21 @@
+problem_statement: <一句话问题陈述>
+decision: |
+  <决定做什么。包含 1..N 个 User Story：
+  As a <role>, I want <feature>, so that <benefit>.>
+acceptance_criteria:
+  - id: AC-1
+    user_story: "As a <role>, I want <feature>, so that <benefit>."
+    statements:
+      - "WHEN <trigger>, THE system SHALL <action>."
+      - "IF <condition>, THEN <action>."
+      - "WHILE <state>, WHEN <trigger>, THE system SHALL <action>."
+  - id: AC-2
+    user_story: "..."
+    statements:
+      - "..."
+rationale: <为什么这么决定，而不是其他方案>
+alternatives_considered:
+  - option: <方案 A>
+    rejected_because: <为什么不选>
+  - option: <方案 B>
+    rejected_because: <为什么不选>
