@@ -28,6 +28,7 @@ from _spec_helpers import (  # noqa: E402
     load_status,
     next_id,
     safe_write,
+    set_source_root,
     slugify,
     today_iso,
 )
@@ -169,6 +170,26 @@ def cmd_requirement(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
+    # G4 fix: enforce source_root presence at the FIRST stage (requirement) so users
+    # discover the misconfiguration immediately rather than after walking three stages
+    # and then having Execute-LandingPrompt refuse to run. Acceptable inputs:
+    #   - meta.source_root already set to a non-placeholder path, OR
+    #   - this invocation passed --source-root <existing path> (set_source_root
+    #     in main() already persisted it before we reach here).
+    meta = status.get("meta") if isinstance(status, dict) else {}
+    meta = meta or {}
+    existing_root = (meta.get("source_root") or "").strip()
+    invalid_placeholders = {"", "<未配置>", "<unset>", "TBD"}
+    if existing_root in invalid_placeholders:
+        print(
+            "ERROR: meta.source_root is missing or a placeholder, and no "
+            "--source-root was supplied for this invocation. Stage 1 (requirement) "
+            "MUST establish source_root so Execute-LandingPrompt can later locate "
+            "the codebase. Re-run with `--source-root <absolute path>`.",
+            file=sys.stderr,
+        )
+        return 2
+
     topic = slugify(args.topic)
 
     # Reuse existing ids if topic already has artifacts so safe_write detects
@@ -204,14 +225,17 @@ def cmd_requirement(args: argparse.Namespace) -> int:
         return 2
 
     transitions = [
-        {"artifact": r_id, "type": "research_finding",
+        {"artifact": r_id, "new_file": True, "proposed_id": r_id,
+         "type": "research_finding", "title": title,
          "from": None, "to": "draft",
          "path": r_path_rel,
          "reason": f"project-state-spec scaffold: requirement stage for {topic}",
          "source": "project-state-spec"},
-        {"artifact": d_id, "type": "decision",
+        {"artifact": d_id, "new_file": True, "proposed_id": d_id,
+         "type": "decision", "title": title,
          "from": None, "to": "draft",
          "path": d_path_rel,
+         "based_on": [r_id],
          "depends_on": [r_id],
          "reason": f"project-state-spec scaffold: requirement stage for {topic}",
          "source": "project-state-spec"},
@@ -291,7 +315,8 @@ def cmd_design(args: argparse.Namespace) -> int:
         return 2
 
     transitions = [{
-        "artifact": plan_id, "type": "plan",
+        "artifact": plan_id, "new_file": True, "proposed_id": plan_id,
+        "type": "plan",
         "from": None, "to": "draft",
         "path": plan_path_rel,
         "depends_on": [r["id"], d["id"]],
@@ -372,8 +397,25 @@ def cmd_tasks(args: argparse.Namespace) -> int:
         lp_path = pst_root / lp_path_rel
         tp_path = pst_root / tp_path_rel
 
-        lp_body = Path(t["lp_content"]).read_text(encoding="utf-8")
-        tp_body = Path(t["tp_content"]).read_text(encoding="utf-8")
+        if "lp_content" not in t or "tp_content" not in t:
+            print(
+                f"ERROR: task #{i} (slug={t.get('slug')!r}) missing "
+                "'lp_content' and/or 'tp_content' in tasks manifest. "
+                "Each task entry must include both fields pointing to a "
+                "tmpfile containing the LP/TP body.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            lp_body = Path(t["lp_content"]).read_text(encoding="utf-8")
+            tp_body = Path(t["tp_content"]).read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            print(
+                f"ERROR: task #{i} (slug={t.get('slug')!r}) refers to "
+                f"missing file: {exc.filename}",
+                file=sys.stderr,
+            )
+            return 2
 
         validates_ac = t.get("validates_ac", [])
         validates_property = t.get("validates_property", [])
@@ -393,7 +435,8 @@ def cmd_tasks(args: argparse.Namespace) -> int:
             return 2
 
         transitions.append({
-            "artifact": lp_id, "type": "landing_prompt",
+            "artifact": lp_id, "new_file": True, "proposed_id": lp_id,
+            "type": "landing_prompt",
             "from": None, "to": "draft",
             "path": lp_path_rel,
             "depends_on": [plan_id],
@@ -401,11 +444,26 @@ def cmd_tasks(args: argparse.Namespace) -> int:
             "source": "project-state-spec",
         })
         transitions.append({
-            "artifact": tp_id, "type": "test_prompt",
+            "artifact": tp_id, "new_file": True, "proposed_id": tp_id,
+            "type": "test_prompt",
             "from": None, "to": "draft",
             "path": tp_path_rel,
             "depends_on": [lp_id],
             "reason": f"project-state-spec scaffold: tasks stage for {topic}",
+            "source": "project-state-spec",
+        })
+        # H4 fix: auto-register preconditions per PST §6C. Each Landing Prompt
+        # requires its upstream Plan to be approved-or-ready before execution.
+        transitions.append({
+            "op": "precondition_register",
+            "target": lp_id,
+            "requires": [{
+                "artifact": plan_id,
+                "field": "status",
+                "condition": "in [approved, ready]",
+            }],
+            "status": "pending",
+            "reason": f"PSS tasks scaffold: {lp_id} requires upstream {plan_id}",
             "source": "project-state-spec",
         })
         written_pairs.append({
@@ -413,7 +471,9 @@ def cmd_tasks(args: argparse.Namespace) -> int:
             "lp_path": lp_path_rel, "tp_path": tp_path_rel,
         })
 
-    # Landing README.
+    # Landing README. Preserve user-edited front-matter and any user-edited
+    # `## LP 序列` section per PST §7 README generation contract. Default to
+    # generated values only when no existing README is present.
     meta = status.get("meta", {}) or {}
     fm_source_root = meta.get("source_root") or "<未配置>"
     fm_scope = meta.get("scope")
@@ -427,18 +487,47 @@ def cmd_tasks(args: argparse.Namespace) -> int:
     if fm_pst_root:
         fm_lines.append(f'pst_root: "{fm_pst_root}"')
     fm_lines.append("---")
-    front_matter = "\n".join(fm_lines)
+    default_front_matter = "\n".join(fm_lines)
 
     sequence_tokens = []
     for slug in lp_sequence:
         match = next((p for p in written_pairs if p["slug"] == slugify(slug)), None)
         if match:
             sequence_tokens.append(f"{match['lp_id']}-{match['slug']}")
-    lp_seq_line = " -> ".join(sequence_tokens)
+    default_lp_seq_line = " -> ".join(sequence_tokens)
 
     standards_section = ""
     if coding_standards:
         standards_section = f"\n## Coding Standards\n\n{coding_standards.strip()}\n"
+
+    readme_path = pst_root / "prompts" / "landing" / "README.md"
+    front_matter = default_front_matter
+    lp_seq_line = default_lp_seq_line
+    existing_body_tail = ""
+    if readme_path.exists():
+        existing = readme_path.read_text(encoding="utf-8")
+        # Preserve user-edited YAML front-matter if present.
+        if existing.startswith("---\n"):
+            end = existing.find("\n---", 4)
+            if end != -1:
+                front_matter = existing[: end + len("\n---")]
+                rest = existing[end + len("\n---"):].lstrip("\n")
+            else:
+                rest = existing
+        else:
+            rest = existing
+        # Preserve user-edited `## LP 序列` content if present.
+        import re as _re
+        m = _re.search(r"(?ms)^## LP 序列\s*\n(.*?)(?=^## |\Z)", rest)
+        if m:
+            existing_seq = m.group(1).strip()
+            if existing_seq:
+                lp_seq_line = existing_seq
+        # Preserve any sections after `## LP 序列` other than what we
+        # regenerate (e.g. user notes appended to README body).
+        tail_match = _re.search(r"(?ms)^## (?!LP 序列|Coding Standards)", rest)
+        if tail_match:
+            existing_body_tail = rest[tail_match.start():]
 
     readme_text = (
         f"{front_matter}\n\n"
@@ -447,7 +536,8 @@ def cmd_tasks(args: argparse.Namespace) -> int:
         f"{lp_seq_line}\n"
         f"{standards_section}"
     )
-    readme_path = pst_root / "prompts" / "landing" / "README.md"
+    if existing_body_tail:
+        readme_text = readme_text.rstrip() + "\n\n" + existing_body_tail
     try:
         safe_write(readme_path, readme_text, force=True)
     except FileExistsRefuseError as exc:  # pragma: no cover - force=True
@@ -457,7 +547,8 @@ def cmd_tasks(args: argparse.Namespace) -> int:
     if fm_source_root == "<未配置>":
         print(
             "WARNING: meta.source_root is missing or placeholder. "
-            "Set it before running Execute-LandingPrompt.",
+            "Re-run with `--source-root <absolute path>` (any stage) or set "
+            "meta.source_root in status.yaml before running Execute-LandingPrompt.",
             file=sys.stderr,
         )
 
@@ -506,12 +597,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--d-content", help="path to tmpfile with D yaml body (stage=requirement)")
     p.add_argument("--plan-content", help="path to tmpfile with Plan markdown body (stage=design)")
     p.add_argument("--tasks-manifest", help="path to tmpfile with tasks JSON manifest (stage=tasks)")
+    p.add_argument("--source-root",
+                   help="Absolute path to source code root. Persisted to "
+                        "meta.source_root so Execute-LandingPrompt can run.")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # B1 fix: persist source_root early so subsequent stages (and ELP) can find
+    # it. Allowed for every stage including 'status' so users can update it
+    # post-hoc with `--stage status --source-root <path>`.
+    if getattr(args, "source_root", None):
+        try:
+            resolved = set_source_root(args.pst_root, args.source_root)
+            print(f"[scaffold_spec] meta.source_root set to {resolved}",
+                  file=sys.stderr)
+        except (StatusYamlMissingError, ValueError) as exc:
+            print(f"ERROR: --source-root: {exc}", file=sys.stderr)
+            return 2
 
     if args.stage == "status":
         return cmd_status(args)

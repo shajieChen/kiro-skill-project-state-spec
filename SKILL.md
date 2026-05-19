@@ -61,8 +61,11 @@ python <pst_root>/Tools/Skills/project-state-spec/tools/scaffold_spec.py \
     --topic <topic> \
     --pst-root <pst_root> \
     --r-content <r-tmpfile> \
-    --d-content <d-tmpfile>
+    --d-content <d-tmpfile> \
+    [--source-root <absolute-path-to-code-root>]
 ```
+
+`--source-root` is optional but **strongly recommended on first invocation** of a project. It persists into `meta.source_root` so Execute-LandingPrompt can find the codebase. Without it, `prompts/landing/README.md` will be written with `source_root: "<未配置>"` and ELP will refuse to run. You can also set it later with `--stage status --source-root <path>`.
 
 (If the script lives in a different absolute path because the skill was installed via `install_skills.py`, use that path. The skill installation directory is typically `~/.kiro/skills/project-state-spec/`.)
 
@@ -125,11 +128,14 @@ Build a JSON manifest:
     ...
   ],
   "lp_sequence": ["slug1", "slug2", ...],
+  "lp_sequence_source": "auto",
   "coding_standards": "<optional>"
 }
 ```
 
 If the user has project-wide coding standards (check `.kiro/steering/` or ask), include them.
+
+`lp_sequence_source: "auto"` tells PST render that this initial topo-sort came from PSS scaffold and may be regenerated until a human edits `## LP 序列` (which flips it to `"user"`). Continue passing `"auto"` on every PSS-driven scaffold; only hand-edits should ever produce `"user"`.
 
 ### Step 3.4 — Scaffold
 ```text

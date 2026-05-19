@@ -60,6 +60,46 @@ def load_status(pst_root: Path | str) -> dict:
     return data
 
 
+def set_source_root(pst_root: Path | str, source_root: str) -> str:
+    """Persist ``meta.source_root`` into ``<pst_root>/status/status.yaml``.
+
+    Returns the absolute path that was written. Raises StatusYamlMissingError
+    if status.yaml is absent. Raises ValueError if source_root does not exist
+    on disk (use --allow-missing-source-root to bypass — not exposed today).
+
+    This is a small, direct YAML edit (not a transition) because meta keys are
+    project configuration, not artifact state. apply_changes.py preserves the
+    key through refresh_meta on subsequent runs.
+    """
+    pst_root = Path(pst_root)
+    status_path = pst_root / "status" / "status.yaml"
+    if not status_path.is_file():
+        raise StatusYamlMissingError(
+            f"status.yaml not found at {status_path}. Run PST INIT first."
+        )
+
+    resolved = Path(source_root).expanduser().resolve()
+    if not resolved.exists():
+        raise ValueError(
+            f"source_root path does not exist: {resolved}. "
+            "Pass an existing directory."
+        )
+
+    with status_path.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"status.yaml at {status_path} must be a mapping at top level")
+
+    meta = data.setdefault("meta", {})
+    meta["source_root"] = str(resolved)
+
+    tmp = status_path.with_suffix(".yaml.tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(data, fh, sort_keys=False, allow_unicode=True)
+    tmp.replace(status_path)
+    return str(resolved)
+
+
 _VALID_PREFIXES = {"R", "D", "LP", "TP"}
 
 
@@ -114,6 +154,12 @@ def find_artifact_by_topic(
     hyphen-containing tail of another topic (e.g. ``guide-button`` must not
     match a path ending in ``readme-guide-button.md``).
 
+    Lookup sections per artifact type (PST stores R in ``research_findings[]``
+    and D in ``decisions[]``, not in ``artifacts[]``):
+      - research_finding → ``research_findings`` then ``artifacts``
+      - decision         → ``decisions`` then ``artifacts``
+      - plan             → ``artifacts``
+
     Returns the first matching entry, or ``None`` if none match.
     Raises ``ValueError`` if ``artifact_type`` is unknown.
     """
@@ -126,14 +172,23 @@ def find_artifact_by_topic(
         raise ValueError(f"Unknown artifact_type: {artifact_type!r}")
     pattern = _re.compile(pattern_map[artifact_type])
 
-    for entry in status.get("artifacts", []) or []:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("type") != artifact_type:
-            continue
-        path = entry.get("path", "")
-        if isinstance(path, str) and pattern.match(path):
-            return entry
+    section_map = {
+        "research_finding": ["research_findings", "artifacts"],
+        "decision":         ["decisions", "artifacts"],
+        "plan":             ["artifacts"],
+    }
+    for section in section_map[artifact_type]:
+        for entry in status.get(section, []) or []:
+            if not isinstance(entry, dict):
+                continue
+            # In dedicated sections (research_findings/decisions) the type
+            # field may be absent or differ ("finding" in research_findings);
+            # don't filter by type when iterating those sections.
+            if section == "artifacts" and entry.get("type") != artifact_type:
+                continue
+            path = entry.get("path", "")
+            if isinstance(path, str) and pattern.match(path):
+                return entry
     return None
 
 
