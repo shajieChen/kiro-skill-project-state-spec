@@ -24,6 +24,7 @@ On `continue`: query `tools/scaffold_spec.py --stage status` and resume at `next
 Before starting any stage:
 1. The current workspace must contain `<pst_root>/status/status.yaml`. If missing, tell the user to run PST INIT first and STOP.
 2. Resolve `<pst_root>` from the user's invocation context. If ambiguous, ask the user.
+3. `<pst_root>/tools/apply_changes.py` must exist. If missing, tell the user: "工具集未部署。请先运行 `Skill project-state-tracker + init` 以完成 workspace 初始化。" Then STOP.
 
 ## Stage 1 — Requirement (produces R + D)
 
@@ -174,6 +175,7 @@ When the user invokes `continue <topic>`:
 | Scenario | Behavior |
 |---|---|
 | status.yaml missing | Tell user to run PST INIT, STOP. |
+| tools/apply_changes.py missing | Tell user to run PST INIT, STOP. |
 | Script returns exit code 2 | Print stderr to user, ask how to proceed. |
 | Script returns exit code 3 (apply_changes failure) | Tell user files were written but status.yaml is out of sync; run PST AUDIT. |
 | User says "rewrite" at confirmation | Re-draft within stage; do NOT invoke script. |
