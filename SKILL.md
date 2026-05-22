@@ -191,6 +191,8 @@ When the user invokes `continue <topic>`:
 
 - **EARS validation is agent-side only.** The scaffold script does not parse or validate AC statements. If the agent's EARS self-check is skipped or wrong, malformed acceptance criteria will land in `decisions/D-NNN-*.yaml` unchecked. The Self-Checks section above is the only enforcement.
 
+- **Tasks --force respects user-edited LP sequences.** If `prompts/landing/README.md` already exists and its front-matter has `lp_sequence_source: "user"`, `--force` will NOT overwrite `## LP 序列`. It only regenerates other README sections. To force-overwrite the sequence, manually reset `lp_sequence_source` to `"auto"` in the README front-matter first.
+
 ## What This Skill Does NOT Do
 
 - Does not execute LPs (use `Execute-LandingPrompt`).

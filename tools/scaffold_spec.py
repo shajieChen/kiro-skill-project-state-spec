@@ -486,6 +486,8 @@ def cmd_tasks(args: argparse.Namespace) -> int:
             fm_lines.append(f'  - "{s}"')
     if fm_pst_root:
         fm_lines.append(f'pst_root: "{fm_pst_root}"')
+    lp_seq_source = manifest.get("lp_sequence_source", "auto")
+    fm_lines.append(f'lp_sequence_source: "{lp_seq_source}"')
     fm_lines.append("---")
     default_front_matter = "\n".join(fm_lines)
 
@@ -516,10 +518,12 @@ def cmd_tasks(args: argparse.Namespace) -> int:
                 rest = existing
         else:
             rest = existing
-        # Preserve user-edited `## LP 序列` content if present.
+        # Preserve user-edited `## LP 序列` content if lp_sequence_source == "user".
+        # When "auto", allow PSS to overwrite with the newly generated sequence.
         import re as _re
+        lp_seq_source_is_user = "lp_sequence_source:" in front_matter and '"user"' in front_matter
         m = _re.search(r"(?ms)^## LP 序列\s*\n(.*?)(?=^## |\Z)", rest)
-        if m:
+        if m and lp_seq_source_is_user:
             existing_seq = m.group(1).strip()
             if existing_seq:
                 lp_seq_line = existing_seq
