@@ -18,12 +18,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 # Make sibling _spec_helpers importable when the script is run directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _spec_helpers import (  # noqa: E402
     FileExistsRefuseError,
     StatusYamlMissingError,
+    ensure_group_exists,
     find_artifact_by_topic,
     load_status,
     next_id,
@@ -379,6 +382,14 @@ def cmd_tasks(args: argparse.Namespace) -> int:
     lp_sequence: list[str] = manifest.get("lp_sequence", [t["slug"] for t in tasks])
     coding_standards: str | None = manifest.get("coding_standards")
 
+    group: str | None = manifest.get("group") or args.group
+
+    if group:
+        ensure_group_exists(status, group)
+        status_path = pst_root / "status" / "status.yaml"
+        with status_path.open("w", encoding="utf-8") as fh:
+            yaml.safe_dump(status, fh, sort_keys=False, allow_unicode=True)
+
     # Allocate sequential ids in manifest order.
     base_lp = next_id(status, "LP")  # e.g. "LP-001"
     base_tp = next_id(status, "TP")
@@ -442,6 +453,7 @@ def cmd_tasks(args: argparse.Namespace) -> int:
             "depends_on": [plan_id],
             "reason": f"project-state-spec scaffold: tasks stage for {topic}",
             "source": "project-state-spec",
+            **({"group": group} if group else {}),
         })
         transitions.append({
             "artifact": tp_id, "new_file": True, "proposed_id": tp_id,
@@ -451,6 +463,7 @@ def cmd_tasks(args: argparse.Namespace) -> int:
             "depends_on": [lp_id],
             "reason": f"project-state-spec scaffold: tasks stage for {topic}",
             "source": "project-state-spec",
+            **({"group": group} if group else {}),
         })
         # H4 fix: auto-register preconditions per PST §6C. Each Landing Prompt
         # requires its upstream Plan to be approved-or-ready before execution.
@@ -503,50 +516,80 @@ def cmd_tasks(args: argparse.Namespace) -> int:
         standards_section = f"\n## Coding Standards\n\n{coding_standards.strip()}\n"
 
     readme_path = pst_root / "prompts" / "landing" / "README.md"
-    front_matter = default_front_matter
-    lp_seq_line = default_lp_seq_line
-    existing_body_tail = ""
-    if readme_path.exists():
+
+    readme_written = False
+    if group and readme_path.exists():
         existing = readme_path.read_text(encoding="utf-8")
-        # Preserve user-edited YAML front-matter if present.
-        if existing.startswith("---\n"):
-            end = existing.find("\n---", 4)
-            if end != -1:
-                front_matter = existing[: end + len("\n---")]
-                rest = existing[end + len("\n---"):].lstrip("\n")
+        if "### " in existing and "## LP 序列" in existing:
+            import re as _re2
+            group_heading = f"### {group}"
+            if group_heading in existing:
+                # Replace existing group section's sequence line.
+                pattern = rf"(### {_re2.escape(group)}\s*\n\s*)(.*?)(\n###|\n## |\Z)"
+                def _repl(m):
+                    return m.group(1) + default_lp_seq_line + "\n" + (m.group(3) if m.group(3) else "")
+                updated = _re2.sub(pattern, _repl, existing, count=1, flags=_re2.DOTALL)
+                safe_write(readme_path, updated, force=True)
+            else:
+                # Append new group section before the next ## heading after LP 序列.
+                lp_seq_start = existing.find("## LP 序列")
+                rest_after_lp = existing[lp_seq_start:]
+                # Find the next ## heading after LP 序列 (but not ### headings).
+                next_h2 = _re2.search(r"\n## (?!LP 序列)", rest_after_lp)
+                if next_h2:
+                    insert_pos = lp_seq_start + next_h2.start()
+                else:
+                    insert_pos = len(existing)
+                new_section = f"\n### {group}\n\n{default_lp_seq_line}\n"
+                updated = existing[:insert_pos] + new_section + existing[insert_pos:]
+                safe_write(readme_path, updated, force=True)
+            readme_written = True
+
+    if not readme_written:
+        front_matter = default_front_matter
+        lp_seq_line = default_lp_seq_line
+        existing_body_tail = ""
+        if readme_path.exists():
+            existing = readme_path.read_text(encoding="utf-8")
+            # Preserve user-edited YAML front-matter if present.
+            if existing.startswith("---\n"):
+                end = existing.find("\n---", 4)
+                if end != -1:
+                    front_matter = existing[: end + len("\n---")]
+                    rest = existing[end + len("\n---"):].lstrip("\n")
+                else:
+                    rest = existing
             else:
                 rest = existing
-        else:
-            rest = existing
-        # Preserve user-edited `## LP 序列` content if lp_sequence_source == "user".
-        # When "auto", allow PSS to overwrite with the newly generated sequence.
-        import re as _re
-        lp_seq_source_is_user = "lp_sequence_source:" in front_matter and '"user"' in front_matter
-        m = _re.search(r"(?ms)^## LP 序列\s*\n(.*?)(?=^## |\Z)", rest)
-        if m and lp_seq_source_is_user:
-            existing_seq = m.group(1).strip()
-            if existing_seq:
-                lp_seq_line = existing_seq
-        # Preserve any sections after `## LP 序列` other than what we
-        # regenerate (e.g. user notes appended to README body).
-        tail_match = _re.search(r"(?ms)^## (?!LP 序列|Coding Standards)", rest)
-        if tail_match:
-            existing_body_tail = rest[tail_match.start():]
+            # Preserve user-edited `## LP 序列` content if lp_sequence_source == "user".
+            # When "auto", allow PSS to overwrite with the newly generated sequence.
+            import re as _re
+            lp_seq_source_is_user = "lp_sequence_source:" in front_matter and '"user"' in front_matter
+            m = _re.search(r"(?ms)^## LP 序列\s*\n(.*?)(?=^## |\Z)", rest)
+            if m and lp_seq_source_is_user:
+                existing_seq = m.group(1).strip()
+                if existing_seq:
+                    lp_seq_line = existing_seq
+            # Preserve any sections after `## LP 序列` other than what we
+            # regenerate (e.g. user notes appended to README body).
+            tail_match = _re.search(r"(?ms)^## (?!LP 序列|Coding Standards)", rest)
+            if tail_match:
+                existing_body_tail = rest[tail_match.start():]
 
-    readme_text = (
-        f"{front_matter}\n\n"
-        f"# Landing Prompts for {_topic_title(topic)}\n\n"
-        f"## LP 序列\n\n"
-        f"{lp_seq_line}\n"
-        f"{standards_section}"
-    )
-    if existing_body_tail:
-        readme_text = readme_text.rstrip() + "\n\n" + existing_body_tail
-    try:
-        safe_write(readme_path, readme_text, force=True)
-    except FileExistsRefuseError as exc:  # pragma: no cover - force=True
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
+        readme_text = (
+            f"{front_matter}\n\n"
+            f"# Landing Prompts for {_topic_title(topic)}\n\n"
+            f"## LP 序列\n\n"
+            f"{lp_seq_line}\n"
+            f"{standards_section}"
+        )
+        if existing_body_tail:
+            readme_text = readme_text.rstrip() + "\n\n" + existing_body_tail
+        try:
+            safe_write(readme_path, readme_text, force=True)
+        except FileExistsRefuseError as exc:  # pragma: no cover - force=True
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
 
     if fm_source_root == "<未配置>":
         print(
@@ -593,6 +636,8 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["requirement", "design", "tasks", "status"])
     p.add_argument("--topic", required=True,
                    help="kebab-case slug uniquely identifying this spec")
+    p.add_argument("--group", default=None,
+                   help="Feature group name for artifact isolation (opt-in)")
     p.add_argument("--pst-root", required=True,
                    help="PST project root (directory containing status/status.yaml)")
     p.add_argument("--force", action="store_true",

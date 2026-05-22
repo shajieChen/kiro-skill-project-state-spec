@@ -206,3 +206,21 @@ def safe_write(path: Path | str, content: str, force: bool) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as fh:
         fh.write(content)
+
+
+def ensure_group_exists(status: dict, group_name: str) -> None:
+    """Ensure a group entry exists in status['groups']. Creates the list if absent.
+
+    Does nothing if the group already exists. Only adds active groups.
+    """
+    if not group_name:
+        return
+    groups = status.setdefault("groups", [])
+    if any(g.get("name") == group_name for g in groups):
+        return
+    groups.append({
+        "name": group_name,
+        "status": "active",
+        "created": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        "description": "",
+    })
