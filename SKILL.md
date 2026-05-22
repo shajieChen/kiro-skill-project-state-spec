@@ -130,9 +130,12 @@ Build a JSON manifest:
   ],
   "lp_sequence": ["slug1", "slug2", ...],
   "lp_sequence_source": "auto",
+  "group": "<optional: feature group name for isolation>",
   "coding_standards": "<optional>"
 }
 ```
+
+`group` is optional. When provided, all scaffolded artifacts (R, D, Plan, LP, TP) are tagged with this group name, and a `groups[]` entry is registered in status.yaml. This enables feature-level isolation in views, LP sequences, and archive operations. When omitted, behavior is identical to current (no group tag).
 
 If the user has project-wide coding standards (check `.kiro/steering/` or ask), include them.
 
