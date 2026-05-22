@@ -1,3 +1,7 @@
+---
+agent_load: false
+---
+
 # project-state-spec
 
 Kiro Agent Skill — 三阶段 Spec 编写工作流（Requirement -> Design -> Task），在磁盘上生成完整的 PST 工件集（R + D + Plan + LP + TP）并通过 `apply_changes.py` 注册到 `status.yaml`。
