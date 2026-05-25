@@ -224,3 +224,22 @@ def ensure_group_exists(status: dict, group_name: str) -> None:
         "created": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         "description": "",
     })
+
+
+def _extract_validates_ac(lp_path: Path | str) -> list[str]:
+    """Extract AC IDs from LP file's validates_ac metadata comment.
+
+    Parses lines matching: <!-- validates_ac: ["AC-1", "AC-2"] -->
+    Returns list of AC ID strings, or empty list if not found.
+    """
+    lp_path = Path(lp_path)
+    if not lp_path.is_file():
+        return []
+    content = lp_path.read_text(encoding="utf-8")
+    m = _re.search(r'<!--\s*validates_ac:\s*\[([^\]]*)\]\s*-->', content)
+    if not m:
+        return []
+    raw = m.group(1)
+    # Parse both quoted and unquoted AC IDs: "AC-1", 'AC-2', AC-3
+    ids = _re.findall(r"['\"]?(AC-\d+)['\"]?", raw)
+    return ids
