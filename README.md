@@ -190,6 +190,48 @@ project-state-spec/
 +-- templates/        # R / D / Plan / LP / TP 模板
 ```
 
+## LP 增量更新能力（2026-05-25 新增）
+
+当 D-NNN.yaml 中的 Acceptance Criteria 变更时，PSS 可以自动分析影响并增量更新受影响的 LandingPrompt 文件。
+
+### 使用方式
+
+**全自动（推荐）：** 修改 D 文件中的 AC → 运行 `Skill project-state-tracker + audit` → LP 自动更新。
+
+**手动调用：**
+```bash
+python tools/scaffold_spec.py --stage update --topic <topic> --pst-root <pst_root> --update-manifest <manifest.json>
+```
+
+### 三种更新模式
+
+| 模式 | 触发条件 | 行为 |
+|------|---------|------|
+| patch | AC 措辞微调（semantic_distance < 0.3） | 原地更新 LP 的 Acceptance Gates 段落 |
+| rewrite | AC 实质性变更或删除（semantic_distance ≥ 0.3） | 生成新版本文件（如 LP-002-core_v2.md），旧文件标记 deprecated |
+| new_lp | 新增 AC 无 LP 覆盖 | 生成新的 LP + TP 配对，插入序列 |
+
+### 自动化链路
+
+```
+D-NNN.yaml 修改 → scan_changes.py (snapshot 缓存)
+    → propagate.py Rule 6 (AC diff + 影响分析)
+    → PST AUDIT Step 4 (agent 判断级别)
+    → scaffold_spec.py --stage update (执行更新)
+```
+
+### 注意事项
+
+- 首次 AUDIT 只建立 baseline，不触发更新
+- LP 文件需要有 `<!-- validates_ac: [...] -->` 元数据（PSS Stage 3 自动生成）
+- `lp_sequence_source: "user"` 时不自动修改 LP 序列
+- 小 patch 自动应用，全量 rewrite 需用户确认
+
+### 相关文件
+
+- 设计文档: `Docs/superpowers/specs/2026-05-25-pss-lp-incremental-update-design.md`
+- 实施计划: `Docs/superpowers/plans/2026-05-25-pss-lp-incremental-update.md`
+
 ## 安装
 
 将本文件夹放置于 `~/.kiro/skills/project-state-spec/`。
