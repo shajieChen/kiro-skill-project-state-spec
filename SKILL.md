@@ -165,6 +165,38 @@ When the user invokes `continue <topic>`:
    - `tasks` → start at Stage 3.1
    - `done` → tell the user the spec is complete, ask if they want to revise a stage. If yes, use `--force` for that stage.
 
+## Update Stage (AC Change Propagation)
+
+When PST AUDIT detects that a D-NNN.yaml file's acceptance criteria have changed,
+it invokes PSS to incrementally update affected LandingPrompts.
+
+### Invocation (by PST AUDIT, not directly by user)
+
+```text
+python <scaffold_spec.py> --stage update --topic <topic> --pst-root <pst_root> --update-manifest <manifest-tmpfile>
+```
+
+### Modes
+
+| Mode | Trigger | Action |
+|------|---------|--------|
+| patch | AC statement wording changed (semantic_distance < 0.3) | In-place update of LP's Acceptance Gates section |
+| rewrite | AC substantially changed or removed (semantic_distance ≥ 0.3) | Generate new versioned LP file (e.g. LP-002-core_v2.md), deprecate old |
+| new_lp | New AC added with no LP coverage | Generate new LP + TP pair, insert into sequence |
+
+### Version Suffix Convention
+
+- Rewrite generates `<old-stem>_v<N>.md` where N is the next available version
+- Old LP is marked `deprecated` in status.yaml
+- New LP gets a fresh sequential ID and inherits `depends_on` from the old LP
+- LP sequence token is updated (if `lp_sequence_source == "auto"`)
+
+### What This Stage Does NOT Do
+
+- Does not decide which mode to use (PST AUDIT agent decides based on AC diff)
+- Does not generate LP/TP content (PST AUDIT agent generates content and passes via tmpfiles)
+- Does not run without an update-manifest (purely mechanical execution)
+
 ## Self-Checks (before invoking the script)
 
 - All Acceptance Criteria use EARS keywords (SHALL, WHEN, IF, WHILE).
