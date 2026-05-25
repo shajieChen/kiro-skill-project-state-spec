@@ -80,6 +80,35 @@ def _write_transitions_and_apply(
     )
 
 
+def _apply_patch(pst_root: Path, upd: dict) -> None:
+    """In-place patch of LP file sections based on patch_sections dict."""
+    import re as _re_p
+    lp_path = pst_root / upd["lp_path"]
+    if not lp_path.is_file():
+        raise FileNotFoundError(f"LP file not found: {lp_path}")
+    content = lp_path.read_text(encoding="utf-8")
+
+    heading_map = {
+        "acceptance_gates": "# Acceptance Gates",
+        "steps": "# Steps",
+        "allowed_files": "# Allowed Files",
+        "handoff_plan": "# Handoff Plan",
+    }
+
+    for section_name, new_content in (upd.get("patch_sections") or {}).items():
+        heading = heading_map.get(section_name)
+        if not heading:
+            continue
+        escaped = _re_p.escape(heading)
+        pattern = rf"({escaped}\s*\n)(.*?)(?=\n# |\Z)"
+        replacement = r"\g<1>" + new_content + "\n"
+        content, count = _re_p.subn(pattern, replacement, content, flags=_re_p.DOTALL)
+        if count == 0:
+            content = content.rstrip() + f"\n\n{heading}\n{new_content}\n"
+
+    safe_write(lp_path, content, force=True)
+
+
 # ---------------------------------------------------------------------------
 # Stage handlers
 # ---------------------------------------------------------------------------
@@ -622,6 +651,73 @@ def cmd_tasks(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    """Execute LP incremental update based on update-manifest."""
+    if not args.update_manifest:
+        print("ERROR: --stage update requires --update-manifest", file=sys.stderr)
+        return 2
+
+    pst_root = Path(args.pst_root)
+    try:
+        status = load_status(pst_root)
+    except StatusYamlMissingError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    topic = slugify(args.topic)
+    manifest = json.loads(Path(args.update_manifest).read_text(encoding="utf-8"))
+
+    transitions = []
+    updated_pairs = []
+
+    for upd in manifest.get("updates", []):
+        if upd["mode"] == "patch":
+            try:
+                _apply_patch(pst_root, upd)
+            except (FileNotFoundError, OSError) as exc:
+                print(f"ERROR: patch failed for {upd.get('lp_id')}: {exc}",
+                      file=sys.stderr)
+                return 2
+            lp_art = next(
+                (a for a in status.get("artifacts", [])
+                 if isinstance(a, dict) and a.get("id") == upd["lp_id"]),
+                None
+            )
+            from_status = lp_art.get("status") if lp_art else "needs_update"
+            transitions.append({
+                "artifact": upd["lp_id"],
+                "type": "landing_prompt",
+                "from": from_status,
+                "to": "draft",
+                "reason": f"AC patch applied by PSS update for {topic}",
+                "source": "project-state-spec",
+            })
+            updated_pairs.append({"lp_id": upd["lp_id"], "mode": "patch"})
+
+        elif upd["mode"] == "rewrite":
+            # Rewrite mode will be added in a subsequent task
+            print(f"WARNING: rewrite mode not yet implemented for {upd.get('lp_id')}",
+                  file=sys.stderr)
+            continue
+
+    if transitions:
+        try:
+            _write_transitions_and_apply(
+                pst_root, transitions,
+                event_summary=f"PSS update: incremental LP update for {topic}",
+                event_type="spec_update",
+            )
+        except FileNotFoundError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 3
+        except subprocess.CalledProcessError as exc:
+            print(f"ERROR: apply_changes.py failed: {exc}", file=sys.stderr)
+            return 3
+
+    print(json.dumps({"updated": updated_pairs}, ensure_ascii=False, indent=2))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -633,7 +729,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="project-state-spec scaffold script.",
     )
     p.add_argument("--stage", required=True,
-                   choices=["requirement", "design", "tasks", "status"])
+                   choices=["requirement", "design", "tasks", "status", "update"])
     p.add_argument("--topic", required=True,
                    help="kebab-case slug uniquely identifying this spec")
     p.add_argument("--group", default=None,
@@ -646,6 +742,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--d-content", help="path to tmpfile with D yaml body (stage=requirement)")
     p.add_argument("--plan-content", help="path to tmpfile with Plan markdown body (stage=design)")
     p.add_argument("--tasks-manifest", help="path to tmpfile with tasks JSON manifest (stage=tasks)")
+    p.add_argument("--update-manifest",
+                   help="path to tmpfile with update JSON manifest (stage=update)")
     p.add_argument("--source-root",
                    help="Absolute path to source code root. Persisted to "
                         "meta.source_root so Execute-LandingPrompt can run.")
@@ -676,6 +774,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_design(args)
     if args.stage == "tasks":
         return cmd_tasks(args)
+    if args.stage == "update":
+        return cmd_update(args)
     parser.error(f"unknown stage: {args.stage}")
     return 2
 
