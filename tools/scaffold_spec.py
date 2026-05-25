@@ -109,6 +109,132 @@ def _apply_patch(pst_root: Path, upd: dict) -> None:
     safe_write(lp_path, content, force=True)
 
 
+def _next_version_suffix(pst_root: Path, lp_path: str) -> str:
+    """Determine next version suffix by scanning existing versioned files."""
+    import re as _re_v
+    base_path = pst_root / lp_path
+    stem = base_path.stem
+    base_stem = _re_v.sub(r"_v\d+$", "", stem)
+    parent = base_path.parent
+
+    max_version = 1
+    if parent.is_dir():
+        for f in parent.glob(f"{base_stem}_v*.md"):
+            m = _re_v.search(r"_v(\d+)\.md$", f.name)
+            if m:
+                max_version = max(max_version, int(m.group(1)))
+
+    return f"v{max_version + 1}"
+
+
+def _find_tp_for_lp(status: dict, lp_id: str) -> dict | None:
+    """Find the TestPrompt artifact that depends_on the given LP id."""
+    for art in status.get("artifacts", []) or []:
+        if not isinstance(art, dict):
+            continue
+        if art.get("type") == "test_prompt" and lp_id in (art.get("depends_on") or []):
+            return art
+    return None
+
+
+def _apply_rewrite(pst_root: Path, status: dict, upd: dict, topic: str) -> dict:
+    """Generate versioned LP file, deprecate old one. Returns transitions + new IDs."""
+    import re as _re_rw
+
+    old_lp_id = upd["lp_id"]
+    version_suffix = upd.get("version_suffix") or _next_version_suffix(pst_root, upd["lp_path"])
+    old_path = pst_root / upd["lp_path"]
+
+    old_stem = old_path.stem
+    base_stem = _re_rw.sub(r"_v\d+$", "", old_stem)
+    new_stem = f"{base_stem}_{version_suffix}"
+    new_path = old_path.parent / f"{new_stem}.md"
+    new_path_rel = str(new_path.relative_to(pst_root)).replace("\\", "/")
+
+    new_lp_body = Path(upd["new_lp_content"]).read_text(encoding="utf-8")
+
+    new_lp_id = next_id(status, "LP")
+
+    validates_ac = upd.get("validates_ac", [])
+    validates_property = upd.get("validates_property", [])
+    meta_block = (
+        f"<!-- validates_ac: {validates_ac} -->\n"
+        f"<!-- validates_property: {validates_property} -->\n"
+    )
+    new_full = f"# {new_lp_id}: {new_stem}\n\n{meta_block}\n{new_lp_body.lstrip()}"
+    safe_write(new_path, new_full, force=True)
+
+    old_art = next(
+        (a for a in status.get("artifacts", [])
+         if isinstance(a, dict) and a.get("id") == old_lp_id),
+        {}
+    )
+    inherited_deps = old_art.get("depends_on", [])
+    from_status = old_art.get("status", "needs_update")
+
+    transitions = [
+        {
+            "artifact": old_lp_id,
+            "type": "landing_prompt",
+            "from": from_status,
+            "to": "deprecated",
+            "reason": f"Superseded by {new_lp_id} ({new_stem}, AC rewrite for {topic})",
+            "source": "project-state-spec",
+        },
+        {
+            "artifact": new_lp_id,
+            "new_file": True,
+            "proposed_id": new_lp_id,
+            "type": "landing_prompt",
+            "from": None,
+            "to": "draft",
+            "path": new_path_rel,
+            "depends_on": inherited_deps,
+            "supersedes": old_lp_id,
+            "reason": f"PSS update rewrite: {new_stem} for {topic}",
+            "source": "project-state-spec",
+        },
+    ]
+
+    if "new_tp_content" in upd:
+        old_tp = _find_tp_for_lp(status, old_lp_id)
+        if old_tp:
+            tp_body = Path(upd["new_tp_content"]).read_text(encoding="utf-8")
+            new_tp_id = next_id(status, "TP")
+            old_tp_path = pst_root / old_tp["path"]
+            tp_base_stem = _re_rw.sub(r"_v\d+$", "", old_tp_path.stem)
+            new_tp_stem = f"{tp_base_stem}_{version_suffix}"
+            new_tp_path = old_tp_path.parent / f"{new_tp_stem}.md"
+            new_tp_path_rel = str(new_tp_path.relative_to(pst_root)).replace("\\", "/")
+            safe_write(new_tp_path, tp_body, force=True)
+            transitions.append({
+                "artifact": old_tp["id"],
+                "type": "test_prompt",
+                "from": old_tp.get("status"),
+                "to": "deprecated",
+                "reason": f"Superseded by {new_tp_id} ({new_tp_stem}, AC rewrite)",
+                "source": "project-state-spec",
+            })
+            transitions.append({
+                "artifact": new_tp_id,
+                "new_file": True,
+                "proposed_id": new_tp_id,
+                "type": "test_prompt",
+                "from": None,
+                "to": "draft",
+                "path": new_tp_path_rel,
+                "depends_on": [new_lp_id],
+                "reason": f"PSS update rewrite: {new_tp_stem} for {topic}",
+                "source": "project-state-spec",
+            })
+
+    return {
+        "transitions": transitions,
+        "new_lp_id": new_lp_id,
+        "new_lp_path": new_path_rel,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Stage handlers
 # ---------------------------------------------------------------------------
@@ -695,10 +821,66 @@ def cmd_update(args: argparse.Namespace) -> int:
             updated_pairs.append({"lp_id": upd["lp_id"], "mode": "patch"})
 
         elif upd["mode"] == "rewrite":
-            # Rewrite mode will be added in a subsequent task
-            print(f"WARNING: rewrite mode not yet implemented for {upd.get('lp_id')}",
-                  file=sys.stderr)
-            continue
+            try:
+                result = _apply_rewrite(pst_root, status, upd, topic)
+            except (FileNotFoundError, OSError) as exc:
+                print(f"ERROR: rewrite failed for {upd.get('lp_id')}: {exc}",
+                      file=sys.stderr)
+                return 2
+            transitions.extend(result["transitions"])
+            updated_pairs.append({
+                "lp_id": upd["lp_id"],
+                "mode": "rewrite",
+                "new_lp_id": result["new_lp_id"],
+                "new_lp_path": result["new_lp_path"],
+            })
+
+    # Process new LPs (for uncovered ACs)
+    for new_lp in manifest.get("new_lps", []):
+        slug = slugify(new_lp["slug"])
+        new_lp_id = next_id(status, "LP")
+        new_tp_id = next_id(status, "TP")
+
+        lp_path_rel = f"prompts/landing/{new_lp_id}-{slug}.md"
+        tp_path_rel = f"prompts/test/{new_tp_id}-{slug}.md"
+
+        lp_body = Path(new_lp["lp_content"]).read_text(encoding="utf-8")
+        tp_body = Path(new_lp["tp_content"]).read_text(encoding="utf-8")
+
+        validates_ac = new_lp.get("validates_ac", [])
+        validates_property = new_lp.get("validates_property", [])
+        meta_block = (
+            f"<!-- validates_ac: {validates_ac} -->\n"
+            f"<!-- validates_property: {validates_property} -->\n"
+        )
+
+        lp_full = f"# {new_lp_id}: {slug}\n\n{meta_block}\n{lp_body.lstrip()}"
+        tp_full = f"# {new_tp_id}: {slug}\n\n{meta_block}\n{tp_body.lstrip()}"
+
+        safe_write(pst_root / lp_path_rel, lp_full, force=args.force)
+        safe_write(pst_root / tp_path_rel, tp_full, force=args.force)
+
+        plan = find_artifact_by_topic(status, topic, "plan")
+        plan_id = plan["id"] if plan else f"Plan.{topic}"
+
+        transitions.append({
+            "artifact": new_lp_id, "new_file": True, "proposed_id": new_lp_id,
+            "type": "landing_prompt", "from": None, "to": "draft",
+            "path": lp_path_rel, "depends_on": [plan_id],
+            "reason": f"PSS update: new LP for uncovered AC in {topic}",
+            "source": "project-state-spec",
+        })
+        transitions.append({
+            "artifact": new_tp_id, "new_file": True, "proposed_id": new_tp_id,
+            "type": "test_prompt", "from": None, "to": "draft",
+            "path": tp_path_rel, "depends_on": [new_lp_id],
+            "reason": f"PSS update: new TP for {new_lp_id} in {topic}",
+            "source": "project-state-spec",
+        })
+        updated_pairs.append({
+            "slug": slug, "mode": "new",
+            "lp_id": new_lp_id, "tp_id": new_tp_id,
+        })
 
     if transitions:
         try:
