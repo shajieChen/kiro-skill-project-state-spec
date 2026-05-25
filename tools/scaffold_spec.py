@@ -235,6 +235,52 @@ def _apply_rewrite(pst_root: Path, status: dict, upd: dict, topic: str) -> dict:
     }
 
 
+def _update_lp_sequence(pst_root: Path, manifest: dict, updated_pairs: list) -> None:
+    """Update LP sequence in README if lp_sequence_source is 'auto'.
+
+    For rewrites: replace old token with new token.
+    For new_lps: insert after the specified token.
+    """
+    readme_path = pst_root / "prompts" / "landing" / "README.md"
+    if not readme_path.is_file():
+        return
+
+    content = readme_path.read_text(encoding="utf-8")
+
+    # Check lp_sequence_source — if "user", don't touch
+    if content.startswith("---\n"):
+        end = content.find("\n---", 4)
+        if end != -1:
+            front_matter = content[:end]
+            if 'lp_sequence_source:' in front_matter and '"user"' in front_matter:
+                return
+
+    # Apply token replacements for rewrites
+    for pair in updated_pairs:
+        if pair.get("mode") == "rewrite" and pair.get("new_lp_path"):
+            from pathlib import PurePosixPath
+            old_stem = PurePosixPath(pair.get("lp_path", pair.get("lp_id", ""))).stem
+            new_stem = PurePosixPath(pair["new_lp_path"]).stem
+            if old_stem and new_stem and old_stem != new_stem:
+                content = content.replace(old_stem, new_stem)
+
+    # Insert new LP tokens after specified position
+    for new_lp in manifest.get("new_lps", []):
+        insert_after = new_lp.get("insert_after", "")
+        new_pair = next(
+            (p for p in updated_pairs
+             if p.get("mode") == "new" and p.get("slug") == slugify(new_lp["slug"])),
+            None
+        )
+        if not new_pair or not insert_after:
+            continue
+        new_token = f"{new_pair['lp_id']}-{new_pair.get('slug', '')}"
+        if insert_after in content:
+            content = content.replace(insert_after, f"{insert_after} -> {new_token}")
+
+    safe_write(readme_path, content, force=True)
+
+
 # ---------------------------------------------------------------------------
 # Stage handlers
 # ---------------------------------------------------------------------------
@@ -895,6 +941,9 @@ def cmd_update(args: argparse.Namespace) -> int:
         except subprocess.CalledProcessError as exc:
             print(f"ERROR: apply_changes.py failed: {exc}", file=sys.stderr)
             return 3
+
+    # Update LP sequence in README
+    _update_lp_sequence(pst_root, manifest, updated_pairs)
 
     print(json.dumps({"updated": updated_pairs}, ensure_ascii=False, indent=2))
     return 0
